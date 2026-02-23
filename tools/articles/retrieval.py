@@ -70,53 +70,9 @@ def get_verified_sites_for_domain(
             db.commit()
             return combined_sites
 
-        print(f"[Articles Tool] New Domain detected ({domain}). Generating organic sources...")
-        messages = [
-            {
-                "role": "system",
-                "content": (
-                    "You are an expert librarian and domain sniper. "
-                    f"The user wants to explore '{domain}'. "
-                    f"Core intent: '{core_intent}'. Desired format: '{article_archetype}'. "
-                    "Return exactly 6 best website domain names as pure JSON array."
-                ),
-            },
-            {"role": "user", "content": f"Subject: {domain}"},
-        ]
-        response = generate_completion(messages, temperature=0.2)
+        print(f"[Articles Tool] New Domain detected ({domain}). Using curated organic sources.")
 
-        try:
-            proposed_sites = json.loads(_clean_json_payload(response))
-            if not isinstance(proposed_sites, list):
-                proposed_sites = []
-        except Exception:
-            proposed_sites = []
-
-        if not proposed_sites:
-            proposed_sites = ["wikipedia.org", "medium.com", "reddit.com"]
-
-        verified_sites: List[str] = []
-        for site in proposed_sites:
-            if not isinstance(site, str):
-                continue
-            normalized = site.replace("https://", "").replace("http://", "").split("/")[0]
-            if not normalized:
-                continue
-            url = f"https://{normalized}"
-            try:
-                response = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=3)
-                if response.status_code == 200:
-                    verified_sites.append(normalized)
-            except Exception as exc:
-                print(f"[Ping Failed] {normalized}: {exc}")
-
-        combined_sites: List[str] = []
-        for site in CURATED_SITES + verified_sites:
-            if site not in combined_sites:
-                combined_sites.append(site)
-
-        if not combined_sites:
-            combined_sites = ["wikipedia.org", "medium.com"]
+        combined_sites = CURATED_SITES.copy()
 
         new_source = DomainSource(domain_name=domain)
         new_source.set_embedding(domain_emb)
@@ -157,28 +113,11 @@ def generate_queries_from_graph(
         heuristic_domain = "arxiv.org"
 
     sniper_domain = heuristic_domain
-    if not sniper_domain:
-        sniper_messages = [
-            {
-                "role": "system",
-                "content": (
-                    f"Given core intent '{core_intent}' and format '{article_archetype}', "
-                    "pick the SINGLE BEST domain from list. Return domain only."
-                ),
-            },
-            {"role": "user", "content": f"Options: {', '.join(verified_sites)}"},
-        ]
-        sniper_domain = generate_completion(sniper_messages, temperature=0.1).strip()
-
-    if sniper_domain not in verified_sites:
-        sniper_domain = verified_sites[0]
-    if sniper_domain not in CURATED_SITES:
-        curated_available = [site for site in verified_sites if site in CURATED_SITES]
-        if curated_available:
-            sniper_domain = curated_available[0]
-
-    sites_filter = f"site:{sniper_domain}"
-    print(f"[Articles Tool] Sniper Strategy selected primary domain: {sniper_domain}")
+    sites_filter = f" site:{sniper_domain}" if sniper_domain else ""
+    if sniper_domain:
+        print(f"[Articles Tool] Sniper Strategy selected primary domain: {sniper_domain}")
+    else:
+        print(f"[Articles Tool] Broad Search Strategy (no specific domain).")
 
     exact_phrase = str(graph.get("exact_phrase_weight", "")).strip()
 
@@ -224,61 +163,35 @@ def generate_queries_from_graph(
 
 def execute_searches(queries: List[str]) -> List[RetrievalHit]:
     """Fetch and verify article-like pages from generated queries."""
+    from duckduckgo_search import DDGS
+    
     raw_results: List[RetrievalHit] = []
     seen_urls = set()
 
     for query in queries:
         try:
-            print(f"[Scraper] Executing Google Search for: {query}")
-            for url in search(query, num_results=3, sleep_interval=2):
-                if not isinstance(url, str) or not _is_http_url(url) or url in seen_urls:
-                    continue
-
-                try:
-                    headers = {
-                        "User-Agent": (
-                            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-                        ),
-                        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                        "Accept-Language": "en-US,en;q=0.5",
-                    }
-                    response = requests.get(url, headers=headers, timeout=5)
-                    if response.status_code != 200:
+            print(f"[Scraper] Executing DuckDuckGo Search for: {query}")
+            with DDGS() as ddgs:
+                results = list(ddgs.text(query, max_results=3, backend="lite"))
+                for res in results:
+                    url = res.get("href", "")
+                    title = res.get("title", "Untitled Article")
+                    snippet = res.get("body", "")
+                    
+                    if not url or url in seen_urls:
                         continue
-
-                    content_type = response.headers.get("Content-Type", "")
-                    if "text/html" not in content_type:
-                        continue
-
-                    soup = BeautifulSoup(response.text, "html.parser")
-                    title = soup.title.string.strip() if soup.title and soup.title.string else "Untitled Article"
-
-                    for tag in soup(["script", "style", "nav", "header", "footer"]):
-                        tag.decompose()
-
-                    snippet = soup.get_text(separator=" ", strip=True)[:1000].strip()
-                    if not snippet:
-                        continue
-
+                        
                     seen_urls.add(url)
                     raw_results.append(
                         RetrievalHit(
                             url=url,
                             title=title,
-                            snippet=snippet,
+                            snippet=snippet[:1000].strip() if snippet else "",
                             source_query=query,
                             retrieval_status="verified",
                         )
                     )
-                except Exception as exc:
-                    print(f"[Scraper] Failed to extract snippet from {url}: {str(exc)[:80]}")
-                    continue
         except Exception as exc:
-            err_str = str(exc)
-            if "429" in err_str:
-                print("[Scraper] Error 429 hit. Stopping search to avoid IP ban.")
-                break
-            print(f"[Scraper] Search failed for '{query}': {err_str[:80]}")
+            print(f"[Scraper] DDGS failed for '{query}': {exc}")
 
     return raw_results

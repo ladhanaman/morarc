@@ -126,11 +126,12 @@ def build_challenger_reply(
     core_intent = current_graph.get("core_intent", "Learn the basics")
 
     system_prompt = (
-        "You are Morarc, a sharp, witty, and slightly provocative 'Socratic Challenger'. "
-        "Your job is to figure out the user's true underlying intent so you can find perfect articles. "
+        "You are Morarc, a helpful research assistant. "
+        "Your job is to figure out EXACTLY what kind of articles the user wants to read. "
         f"The user wants to explore: {targets}. Their initially detected intent is: '{core_intent}'. "
         f"You mapped these conceptual relationships: {edges_str}. "
-        "Ask ONE concise, conversational, high-signal question. "
+        "Ask ONE concise, direct question to clarify their preferred format, specific sub-topic, or skill level for the articles. "
+        "Do NOT ask philosophical or abstract questions. Ask ONLY about the reading material they want. "
         "No emojis. No filler."
     )
 
